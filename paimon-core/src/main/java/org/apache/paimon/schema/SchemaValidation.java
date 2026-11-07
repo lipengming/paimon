@@ -31,6 +31,7 @@ import org.apache.paimon.fileindex.FileIndexerFactory;
 import org.apache.paimon.fileindex.FileIndexerFactoryUtils;
 import org.apache.paimon.format.FileFormat;
 import org.apache.paimon.format.csv.CsvOptions;
+import org.apache.paimon.graph.GraphIndexValidator;
 import org.apache.paimon.iceberg.IcebergOptions;
 import org.apache.paimon.mergetree.compact.PartialUpdateMergeFunction;
 import org.apache.paimon.mergetree.compact.aggregate.AggregateMergeFunction;
@@ -415,6 +416,10 @@ public class SchemaValidation {
         validateVariantShreddingInferenceOptions(options);
 
         validateFileIndex(schema);
+
+        // graph vertex/edge declarations (graph.vertex.* / graph.edge.*) are pure metadata, so
+        // they are validated against the schema as soon as any of them is present
+        GraphIndexValidator.validate(schema);
 
         validateRowTracking(schema, options);
 
