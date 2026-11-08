@@ -93,6 +93,16 @@ public final class GraphEdgeIndexPlanner {
         return baseTableName + EDGE_REV_TABLE_SUFFIX;
     }
 
+    /** The physical adjacency column of one aggregate entry: alias wins, wildcard maps to cnt. */
+    public static String aggregateColumn(GraphEdgeAggregate aggregate) {
+        if (aggregate.alias() != null) {
+            return aggregate.alias();
+        }
+        return aggregate.isWildcard()
+                ? COUNT_COLUMN
+                : aggregate.function() + "_" + aggregate.field();
+    }
+
     /**
      * Expands the 'graph.edge.*' declaration of the base schema into the adjacency index table
      * schemas. The declaration is expected to be schema-validated already ({@link
@@ -133,11 +143,9 @@ public final class GraphEdgeIndexPlanner {
         addColumn(columns, usedNames, trailingField, fieldTypes.get(trailingField));
 
         for (GraphEdgeAggregate aggregate : edge.aggregates()) {
-            String column;
-            DataType type;
             String function;
+            DataType type;
             if (aggregate.isWildcard()) {
-                column = COUNT_COLUMN;
                 type = DataTypes.BIGINT();
                 function = SUM;
             } else {
@@ -146,7 +154,6 @@ public final class GraphEdgeIndexPlanner {
                         "Aggregate function 'count' in 'graph.edge.aggregates' only supports the"
                                 + " wildcard field '*', but got field '%s'.",
                         aggregate.field());
-                column = aggregate.function() + "_" + aggregate.field();
                 type = fieldTypes.get(aggregate.field());
                 checkArgument(
                         type != null,
@@ -154,9 +161,7 @@ public final class GraphEdgeIndexPlanner {
                         aggregate.field());
                 function = aggregate.function();
             }
-            if (aggregate.alias() != null) {
-                column = aggregate.alias();
-            }
+            String column = aggregateColumn(aggregate);
 
             checkArgument(
                     !usedNames.contains(column),
