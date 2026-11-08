@@ -23,12 +23,14 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.options.GraphIndexOptions;
 import org.apache.paimon.schema.Schema;
+import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Create pipeline of graph indexes (design §5.6): expands the declarations into physical index
@@ -76,6 +78,16 @@ public final class GraphIndexManager {
             upsertStatus(
                     catalog, baseTable, plan.edgeRevTableName(), aggregates, buildSnapshotId, now);
         }
+        mirrorStatus(
+                catalog, baseTable, baseSchema.options(), plan.edgeTableName(), buildSnapshotId);
+        if (plan.reverse()) {
+            mirrorStatus(
+                    catalog,
+                    baseTable,
+                    baseSchema.options(),
+                    plan.edgeRevTableName(),
+                    buildSnapshotId);
+        }
         return created;
     }
 
@@ -116,6 +128,45 @@ public final class GraphIndexManager {
                         buildSnapshotId,
                         null,
                         now));
+    }
+
+    /**
+     * Mirrors one index entry's state onto the base table options so that the {@code
+     * $graph_indexes} system table can expose it without a catalog reference; the maintenance
+     * pipeline refreshes the watermark key per checkpoint (design §5.1/§5.5).
+     */
+    private static void mirrorStatus(
+            Catalog catalog,
+            Identifier baseTable,
+            Map<String, String> currentOptions,
+            String indexTableName,
+            Long buildSnapshotId) {
+        List<SchemaChange> changes = new ArrayList<>();
+        changes.add(
+                SchemaChange.setOption(
+                        GraphIndexOptions.STATUS_KEY_PREFIX + indexTableName,
+                        GraphIndexStatusTable.STATUS_BUILDING));
+        String buildSnapshotKey = GraphIndexOptions.BUILD_SNAPSHOT_KEY_PREFIX + indexTableName;
+        if (buildSnapshotId != null) {
+            changes.add(SchemaChange.setOption(buildSnapshotKey, String.valueOf(buildSnapshotId)));
+        } else if (currentOptions.containsKey(buildSnapshotKey)) {
+            changes.add(SchemaChange.removeOption(buildSnapshotKey));
+        }
+        String watermarkKey = GraphIndexOptions.WATERMARK_KEY_PREFIX + indexTableName;
+        if (currentOptions.containsKey(watermarkKey)) {
+            changes.add(SchemaChange.removeOption(watermarkKey));
+        }
+        try {
+            catalog.alterTable(baseTable, changes, false);
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to mirror graph index status onto table '"
+                            + baseTable.getDatabaseName()
+                            + "."
+                            + baseTable.getTableName()
+                            + "'",
+                    e);
+        }
     }
 
     /** The latest snapshot id of the table, null when the table has no snapshot yet. */

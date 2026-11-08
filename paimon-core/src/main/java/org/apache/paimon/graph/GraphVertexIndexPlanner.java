@@ -51,6 +51,9 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  */
 public final class GraphVertexIndexPlanner {
 
+    /** Suffix of the standalone node-map index table (table backend, design §4.3/§4.6). */
+    public static final String NODE_MAP_TABLE_SUFFIX = "__node_map";
+
     private GraphVertexIndexPlanner() {}
 
     /**

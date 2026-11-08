@@ -219,4 +219,22 @@ public class GraphIndexOptions implements Serializable {
                     .withDescription(
                             "Alert threshold for the lag between the base table's latest snapshot"
                                     + " and the index coverage watermark.");
+
+    // --------------------------------------------------------------------------------------------
+    // Internal status mirror keys (not user configuration)
+    //
+    // The maintenance pipeline keeps the runtime truth in the per-database graph_index_status
+    // table, and mirrors the per-index-entry state onto the base table's own options so that the
+    // '$graph_indexes' system table can expose it without a catalog reference (design §5.1/§5.5).
+    // The key suffix is the index table name, or 'node_map' for the pk-index vertex backend.
+    // --------------------------------------------------------------------------------------------
+
+    /** Prefix of the base-table option mirroring one index entry's build status. */
+    public static final String STATUS_KEY_PREFIX = "graph.index.status.";
+
+    /** Prefix of the base-table option mirroring one index entry's backfill start snapshot. */
+    public static final String BUILD_SNAPSHOT_KEY_PREFIX = "graph.index.build-snapshot.";
+
+    /** Prefix of the base-table option mirroring one index entry's coverage watermark. */
+    public static final String WATERMARK_KEY_PREFIX = "graph.index.watermark.";
 }

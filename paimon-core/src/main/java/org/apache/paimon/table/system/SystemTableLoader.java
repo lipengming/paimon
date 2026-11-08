@@ -53,6 +53,7 @@ import static org.apache.paimon.table.system.ConsumersTable.CONSUMERS;
 import static org.apache.paimon.table.system.FileIndexesTable.FILE_INDEXES;
 import static org.apache.paimon.table.system.FileKeyRangesTable.FILE_KEY_RANGES;
 import static org.apache.paimon.table.system.FilesTable.FILES;
+import static org.apache.paimon.table.system.GraphIndexesTable.GRAPH_INDEXES;
 import static org.apache.paimon.table.system.ManifestsTable.MANIFESTS;
 import static org.apache.paimon.table.system.OptionsTable.OPTIONS;
 import static org.apache.paimon.table.system.PartitionsTable.PARTITIONS;
@@ -87,6 +88,7 @@ public class SystemTableLoader {
                     .put(STATISTICS, StatisticTable::new)
                     .put(BINLOG, BinlogTable::new)
                     .put(TABLE_INDEXES, TableIndexesTable::new)
+                    .put(GRAPH_INDEXES, GraphIndexesTable::new)
                     .put(ROW_TRACKING, RowTrackingTable::new)
                     .build();
 

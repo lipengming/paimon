@@ -22,10 +22,6 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.catalog.FileSystemCatalog;
 import org.apache.paimon.catalog.Identifier;
-import org.apache.paimon.data.BinaryString;
-import org.apache.paimon.data.Decimal;
-import org.apache.paimon.data.GenericRow;
-import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.options.GraphIndexOptions;
@@ -33,10 +29,6 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
-import org.apache.paimon.table.Table;
-import org.apache.paimon.table.sink.BatchTableCommit;
-import org.apache.paimon.table.sink.BatchTableWrite;
-import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 
@@ -44,8 +36,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.math.BigDecimal;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +63,7 @@ class GraphIndexManagerTest {
 
     @Test
     void testCreateEdgeIndexEndToEnd() throws Exception {
-        Identifier base = createTransferBase(true);
+        Identifier base = GraphIndexManagerTestHelper.createTransferBase(catalog, true);
 
         List<Identifier> created = GraphIndexManager.createEdgeIndex(catalog, base);
 
@@ -96,6 +86,17 @@ class GraphIndexManagerTest {
         assertThat(rev.primaryKeys()).containsExactly("dst_id", "src_id");
         assertThat(rev.options()).containsEntry("bucket-key", "dst_id");
 
+        // status mirror on the base table feeds the $graph_indexes system table
+        Map<String, String> baseOptions =
+                ((FileStoreTable) catalog.getTable(base)).schema().options();
+        assertThat(baseOptions)
+                .containsEntry(GraphIndexOptions.STATUS_KEY_PREFIX + "transfer__edge", "BUILDING")
+                .containsEntry(GraphIndexOptions.BUILD_SNAPSHOT_KEY_PREFIX + "transfer__edge", "1")
+                .containsEntry(
+                        GraphIndexOptions.STATUS_KEY_PREFIX + "transfer__edge_rev", "BUILDING")
+                .containsEntry(
+                        GraphIndexOptions.BUILD_SNAPSHOT_KEY_PREFIX + "transfer__edge_rev", "1");
+
         List<GraphIndexStatusTable.StatusRow> rows = GraphIndexStatusTable.read(catalog, "mydb");
         assertThat(rows).hasSize(2);
         for (GraphIndexStatusTable.StatusRow row : rows) {
@@ -111,7 +112,7 @@ class GraphIndexManagerTest {
 
     @Test
     void testCreateEdgeIndexIdempotent() throws Exception {
-        Identifier base = createTransferBase(true);
+        Identifier base = GraphIndexManagerTestHelper.createTransferBase(catalog, true);
 
         GraphIndexManager.createEdgeIndex(catalog, base);
         GraphIndexManager.createEdgeIndex(catalog, base);
@@ -122,7 +123,7 @@ class GraphIndexManagerTest {
 
     @Test
     void testCreateEdgeIndexWithoutSnapshot() throws Exception {
-        Identifier base = createTransferBase(false);
+        Identifier base = GraphIndexManagerTestHelper.createTransferBase(catalog, false);
 
         GraphIndexManager.createEdgeIndex(catalog, base);
 
@@ -184,52 +185,5 @@ class GraphIndexManagerTest {
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).status()).isEqualTo("ACTIVE");
         assertThat(rows.get(0).coverageWatermark()).isEqualTo(5L);
-    }
-
-    private Identifier createTransferBase(boolean writeRow) throws Exception {
-        Map<String, String> options = new HashMap<>();
-        options.put(GraphIndexOptions.GRAPH_EDGE_ENABLED.key(), "true");
-        options.put(GraphIndexOptions.GRAPH_EDGE_SRC_FIELD.key(), "src_id");
-        options.put(GraphIndexOptions.GRAPH_EDGE_DST_FIELD.key(), "dst_id");
-        options.put(GraphIndexOptions.GRAPH_EDGE_SRC_VERTEX.key(), "person");
-        options.put(GraphIndexOptions.GRAPH_EDGE_DST_VERTEX.key(), "merchant");
-        options.put(
-                GraphIndexOptions.GRAPH_EDGE_AGGREGATES.key(),
-                "amount:sum;tx_time:last_non_null_value;*:count");
-
-        Identifier id = Identifier.create("mydb", "transfer");
-        catalog.createTable(
-                id,
-                new Schema(
-                        Arrays.asList(
-                                new DataField(0, "src_id", DataTypes.BIGINT()),
-                                new DataField(1, "dst_id", DataTypes.BIGINT()),
-                                new DataField(2, "amount", DataTypes.DECIMAL(18, 2)),
-                                new DataField(3, "tx_time", DataTypes.TIMESTAMP(3)),
-                                new DataField(4, "dt", DataTypes.STRING())),
-                        singletonList("dt"),
-                        emptyList(),
-                        options,
-                        ""),
-                false);
-
-        if (writeRow) {
-            Table table = catalog.getTable(id);
-            BatchWriteBuilder builder = table.newBatchWriteBuilder();
-            try (BatchTableWrite write = builder.newWrite()) {
-                write.write(
-                        GenericRow.of(
-                                1L,
-                                2L,
-                                Decimal.fromBigDecimal(new BigDecimal("10.00"), 18, 2),
-                                Timestamp.fromEpochMillis(1699000000000L),
-                                BinaryString.fromString("x"),
-                                BinaryString.fromString("2026-11-08")));
-                try (BatchTableCommit commit = builder.newCommit()) {
-                    commit.commit(write.prepareCommit());
-                }
-            }
-        }
-        return id;
     }
 }
