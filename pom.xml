@@ -77,6 +77,7 @@ under the License.
         <module>paimon-mosaic</module>
         <module>paimon-full-text</module>
         <module>paimon-vector</module>
+        <module>paimon-graph</module>
     </modules>
 
     <properties>
