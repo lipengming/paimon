@@ -84,7 +84,6 @@ final class GraphIndexManagerTestHelper {
                                 2L,
                                 Decimal.fromBigDecimal(new BigDecimal("10.00"), 18, 2),
                                 Timestamp.fromEpochMillis(1699000000000L),
-                                BinaryString.fromString("x"),
                                 BinaryString.fromString("2026-11-08")));
                 try (BatchTableCommit commit = builder.newCommit()) {
                     commit.commit(write.prepareCommit());

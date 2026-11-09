@@ -47,16 +47,18 @@ class GraphEdgeIndexBackfillTest {
         assertThat(sqls.get(0))
                 .isEqualTo(
                         "INSERT INTO `db`.`transfer__edge`\n"
-                                + "SELECT `src_id`, `dst_id`, SUM(`amount`) AS `sum_amount`,"
-                                + " MAX(`tx_time`) AS `last_non_null_value_tx_time`, COUNT(*) AS"
+                                + "SELECT `src_id`, `dst_id`, CAST(SUM(`amount`) AS DECIMAL(18, 2))"
+                                + " AS `sum_amount`, CAST(MAX(`tx_time`) AS TIMESTAMP(3)) AS"
+                                + " `last_non_null_value_tx_time`, CAST(COUNT(*) AS BIGINT) AS"
                                 + " `cnt`\n"
                                 + "FROM `db`.`transfer` /*+ OPTIONS('scan.snapshot-id'='17') */\n"
                                 + "GROUP BY `src_id`, `dst_id`");
         assertThat(sqls.get(1))
                 .isEqualTo(
                         "INSERT INTO `db`.`transfer__edge_rev`\n"
-                                + "SELECT `dst_id`, `src_id`, SUM(`amount`) AS `sum_amount`,"
-                                + " MAX(`tx_time`) AS `last_non_null_value_tx_time`, COUNT(*) AS"
+                                + "SELECT `dst_id`, `src_id`, CAST(SUM(`amount`) AS DECIMAL(18, 2))"
+                                + " AS `sum_amount`, CAST(MAX(`tx_time`) AS TIMESTAMP(3)) AS"
+                                + " `last_non_null_value_tx_time`, CAST(COUNT(*) AS BIGINT) AS"
                                 + " `cnt`\n"
                                 + "FROM `db`.`transfer` /*+ OPTIONS('scan.snapshot-id'='17') */\n"
                                 + "GROUP BY `dst_id`, `src_id`");
@@ -69,7 +71,34 @@ class GraphEdgeIndexBackfillTest {
         List<String> sqls = GraphEdgeIndexBackfill.generateSql("db", "transfer", base, 1L);
 
         assertThat(sqls).hasSize(1);
-        assertThat(sqls.get(0)).contains("SUM(`amount`) AS `amt`").doesNotContain("sum_amount");
+        assertThat(sqls.get(0))
+                .contains("CAST(SUM(`amount`) AS DECIMAL(18, 2)) AS `amt`")
+                .doesNotContain("sum_amount");
+    }
+
+    @Test
+    void testGenerateIncrementalSql() {
+        TableSchema base = transferSchema("amount:sum;tx_time:last_non_null_value;*:count", true);
+
+        List<String> sqls =
+                GraphEdgeIndexBackfill.generateIncrementalSql("db", "transfer", base, 3L, 7L);
+
+        assertThat(sqls).hasSize(2);
+        assertThat(sqls.get(0))
+                .contains("FROM `db`.`transfer`" + " /*+ OPTIONS('incremental-between'='3,7') */")
+                .contains("GROUP BY `src_id`, `dst_id`");
+        assertThat(sqls.get(1))
+                .contains("FROM `db`.`transfer`" + " /*+ OPTIONS('incremental-between'='3,7') */")
+                .contains("GROUP BY `dst_id`, `src_id`");
+    }
+
+    @Test
+    void testGenerateIncrementalSqlEmptyInterval() {
+        TableSchema base = transferSchema("*:count", false);
+        assertThat(GraphEdgeIndexBackfill.generateIncrementalSql("db", "transfer", base, 5L, 5L))
+                .isEmpty();
+        assertThat(GraphEdgeIndexBackfill.generateIncrementalSql("db", "transfer", base, 6L, 5L))
+                .isEmpty();
     }
 
     @Test

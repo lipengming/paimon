@@ -44,10 +44,47 @@ public final class GraphEdgeIndexBackfill {
      */
     public static List<String> generateSql(
             String database, String baseTableName, TableSchema baseSchema, Long snapshotId) {
-        List<String> sqls = new ArrayList<>();
         if (snapshotId == null) {
-            return sqls;
+            return new ArrayList<>();
         }
+        return generate(
+                database,
+                baseTableName,
+                baseSchema,
+                "scan.snapshot-id",
+                String.valueOf(snapshotId));
+    }
+
+    /**
+     * Generates the incremental maintenance statements of one micro-batch (design §7.2/§7.3): the
+     * same aggregation as the backfill, restricted to the snapshot interval {@code (from, to]}
+     * through the {@code OPTIONS('incremental-between'...)} hint. Every statement is idempotent
+     * relative to the coverage watermark contract: the caller advances the watermark only after all
+     * statements committed.
+     */
+    public static List<String> generateIncrementalSql(
+            String database,
+            String baseTableName,
+            TableSchema baseSchema,
+            long fromExclusive,
+            long toInclusive) {
+        if (toInclusive <= fromExclusive) {
+            return new ArrayList<>();
+        }
+        return generate(
+                database,
+                baseTableName,
+                baseSchema,
+                "incremental-between",
+                fromExclusive + "," + toInclusive);
+    }
+
+    private static List<String> generate(
+            String database,
+            String baseTableName,
+            TableSchema baseSchema,
+            String hintKey,
+            String hintValue) {
         GraphEdgeIndexPlan plan = GraphEdgeIndexPlanner.plan(baseTableName, baseSchema);
         GraphEdgeIndexDecl decl =
                 GraphIndexDecls.from(baseSchema)
@@ -58,7 +95,16 @@ public final class GraphEdgeIndexBackfill {
                                                 String.format(
                                                         "Table '%s' has no graph edge declaration.",
                                                         baseTableName)));
-        sqls.add(one(database, baseTableName, plan.edgeTableName(), plan.edge(), decl, snapshotId));
+        List<String> sqls = new ArrayList<>();
+        sqls.add(
+                one(
+                        database,
+                        baseTableName,
+                        plan.edgeTableName(),
+                        plan.edge(),
+                        decl,
+                        hintKey,
+                        hintValue));
         if (plan.reverse()) {
             sqls.add(
                     one(
@@ -67,7 +113,8 @@ public final class GraphEdgeIndexBackfill {
                             plan.edgeRevTableName(),
                             plan.edgeRev(),
                             decl,
-                            snapshotId));
+                            hintKey,
+                            hintValue));
         }
         return sqls;
     }
@@ -78,7 +125,8 @@ public final class GraphEdgeIndexBackfill {
             String indexTableName,
             TableSchema indexSchema,
             GraphEdgeIndexDecl decl,
-            long snapshotId) {
+            String hintKey,
+            String hintValue) {
         List<String> select = new ArrayList<>();
         for (String endpoint : indexSchema.primaryKeys()) {
             select.add(quoted(endpoint));
@@ -92,22 +140,41 @@ public final class GraphEdgeIndexBackfill {
                                     + "("
                                     + quoted(aggregate.field())
                                     + ")";
-            select.add(expr + " AS " + quoted(column));
+            // cast to the expanded column type: SUM(DECIMAL(p, s)) widens the precision on some
+            // engines and the sink would otherwise reject the insert
+            select.add(
+                    "CAST("
+                            + expr
+                            + " AS "
+                            + typeOf(indexSchema, column).asSQLString()
+                            + ") AS "
+                            + quoted(column));
         }
         return String.format(
                 "INSERT INTO `%s`.`%s`\n"
                         + "SELECT %s\n"
-                        + "FROM `%s`.`%s` /*+ OPTIONS('scan.snapshot-id'='%d') */\n"
+                        + "FROM `%s`.`%s` /*+ OPTIONS('%s'='%s') */\n"
                         + "GROUP BY %s",
                 database,
                 indexTableName,
                 String.join(", ", select),
                 database,
                 baseTableName,
-                snapshotId,
+                hintKey,
+                hintValue,
                 indexSchema.primaryKeys().stream()
                         .map(GraphEdgeIndexBackfill::quoted)
                         .collect(Collectors.joining(", ")));
+    }
+
+    private static org.apache.paimon.types.DataType typeOf(TableSchema indexSchema, String column) {
+        for (org.apache.paimon.types.DataField field : indexSchema.fields()) {
+            if (field.name().equals(column)) {
+                return field.type();
+            }
+        }
+        throw new IllegalArgumentException(
+                "Expanded adjacency column '" + column + "' is missing from the index schema.");
     }
 
     private static String sqlFunction(String function) {
