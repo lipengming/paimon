@@ -20,6 +20,10 @@ package org.apache.paimon.graph.sdk;
 
 import org.apache.paimon.annotation.Public;
 
+import javax.annotation.Nullable;
+
+import java.util.List;
+
 /**
  * Facade of the graph traversal SDK (design §8.1): binds vertex and edge tables of one catalog and
  * exposes the read primitives over their graph indexes.
@@ -45,6 +49,33 @@ public interface GraphStore extends AutoCloseable {
 
     /** Point lookup of vertex rows by node id (design §8.1 ④). */
     VertexQuerier vertex(String vertex);
+
+    /**
+     * Two-hop path lookup (design §8.1 ⑤): a semi-join where the first hop is filtered and ranked
+     * by {@code filter} (when given) and only the top-{@code degreeCap} intermediate vertices are
+     * expanded, so a super-vertex never fans out the whole second hop. Both hops use the same
+     * direction.
+     */
+    List<Path2> twoHop(
+            String edge,
+            Direction direction,
+            long src,
+            @Nullable EdgeFilter filter,
+            DegreeCap degreeCap,
+            ResultCap resultCap);
+
+    /**
+     * Breadth-first K-hop traversal (design §8.1 ⑥): returns every path discovered up to {@code
+     * hops} edges, with a global visited set to break cycles. Deeper traversals (more than three
+     * hops) belong on the batch engines.
+     */
+    List<GraphPath> kHop(
+            String edge,
+            Direction direction,
+            long src,
+            int hops,
+            DegreeCap degreeCap,
+            ResultCap resultCap);
 
     @Override
     void close();

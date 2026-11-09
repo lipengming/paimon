@@ -266,6 +266,260 @@ class PaimonGraphStoreTest {
                 .hasMessageContaining("does not declare reverse adjacency");
     }
 
+    @Test
+    void testTwoHopOut() {
+        GraphStore store = builtStore();
+
+        List<Path2> paths =
+                store.twoHop(
+                        "transfer", Direction.OUT, 1L, null, DegreeCap.of(10), ResultCap.of(100));
+
+        assertThat(paths).hasSize(2);
+        assertThat(paths.toString()).contains("1 -> 2 -> 3", "1 -> 3 -> 4");
+        for (Path2 path : paths) {
+            assertThat(path.src()).isEqualTo(1L);
+            if (path.mid() == 2L) {
+                assertThat(path.dst()).isEqualTo(3L);
+                assertThat(path.firstHop().getDecimal("sum_amount"))
+                        .isEqualByComparingTo(new BigDecimal("15.00"));
+                assertThat(path.firstHop().getLong("cnt")).isEqualTo(2L);
+                assertThat(path.secondHop().getDecimal("sum_amount"))
+                        .isEqualByComparingTo(new BigDecimal("1.00"));
+            } else {
+                assertThat(path.mid()).isEqualTo(3L);
+                assertThat(path.dst()).isEqualTo(4L);
+                assertThat(path.firstHop().getDecimal("sum_amount"))
+                        .isEqualByComparingTo(new BigDecimal("7.00"));
+                assertThat(path.secondHop().getLong("cnt")).isEqualTo(1L);
+            }
+        }
+    }
+
+    @Test
+    void testTwoHopIn() {
+        GraphStore store = builtStore();
+
+        List<Path2> paths =
+                store.twoHop(
+                        "transfer", Direction.IN, 4L, null, DegreeCap.of(10), ResultCap.of(100));
+
+        assertThat(paths).hasSize(2);
+        assertThat(paths.toString()).contains("4 -> 3 -> 1", "4 -> 3 -> 2");
+    }
+
+    @Test
+    void testTwoHopEdgeFilterRestrictsFirstHop() {
+        GraphStore store = builtStore();
+
+        List<Path2> paths =
+                store.twoHop(
+                        "transfer",
+                        Direction.OUT,
+                        1L,
+                        EdgeFilter.where("sum_amount").ge(new BigDecimal("10")),
+                        DegreeCap.of(10),
+                        ResultCap.of(100));
+
+        assertThat(paths).hasSize(1);
+        assertThat(paths.get(0).mid()).isEqualTo(2L);
+        assertThat(paths.get(0).dst()).isEqualTo(3L);
+    }
+
+    @Test
+    void testTwoHopEdgeFilterLongColumn() {
+        GraphStore store = builtStore();
+
+        List<Path2> paths =
+                store.twoHop(
+                        "transfer",
+                        Direction.OUT,
+                        1L,
+                        EdgeFilter.where("cnt").gt(1L),
+                        DegreeCap.of(10),
+                        ResultCap.of(100));
+
+        assertThat(paths).hasSize(1);
+        assertThat(paths.get(0).mid()).isEqualTo(2L);
+    }
+
+    @Test
+    void testTwoHopDegreeCapKeepsTopIntermediateVertices() {
+        GraphStore store = builtStore();
+
+        // the first hop is ranked by sum_amount descending, so only 1 -> 2 -> 3 remains
+        List<Path2> paths =
+                store.twoHop(
+                        "transfer", Direction.OUT, 1L, null, DegreeCap.of(1), ResultCap.of(100));
+
+        assertThat(paths).hasSize(1);
+        assertThat(paths.get(0).mid()).isEqualTo(2L);
+    }
+
+    @Test
+    void testTwoHopResultCapThrows() {
+        GraphStore store = builtStore();
+
+        assertThatThrownBy(
+                        () ->
+                                store.twoHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        null,
+                                        DegreeCap.of(10),
+                                        ResultCap.of(1)))
+                .isInstanceOf(GraphCapExceededException.class)
+                .hasMessageContaining("exceeded resultCap=1");
+    }
+
+    @Test
+    void testKHopBfs() {
+        GraphStore store = builtStore();
+
+        List<GraphPath> paths =
+                store.kHop("transfer", Direction.OUT, 1L, 2, DegreeCap.of(10), ResultCap.of(100));
+
+        assertThat(paths).hasSize(3);
+        assertThat(paths.toString()).contains("1 -> 2", "1 -> 3", "1 -> 3 -> 4");
+        for (GraphPath path : paths) {
+            assertThat(path.start()).isEqualTo(1L);
+            assertThat(path.length()).isBetween(1, 2);
+        }
+    }
+
+    @Test
+    void testKHopBreaksCycles() {
+        GraphStore store = builtStore();
+
+        // 1 -> 2 -> 3 -> 4 is discoverable, the back edge 2 -> 3 is already visited
+        List<GraphPath> paths =
+                store.kHop("transfer", Direction.OUT, 1L, 3, DegreeCap.of(10), ResultCap.of(100));
+
+        assertThat(paths).hasSize(3);
+        assertThat(paths.stream().anyMatch(path -> path.length() == 3)).isFalse();
+    }
+
+    @Test
+    void testKHopInDirection() {
+        GraphStore store = builtStore();
+
+        List<GraphPath> paths =
+                store.kHop("transfer", Direction.IN, 4L, 2, DegreeCap.of(10), ResultCap.of(100));
+
+        assertThat(paths).hasSize(3);
+        assertThat(paths.toString()).contains("4 -> 3", "4 -> 3 -> 1", "4 -> 3 -> 2");
+    }
+
+    @Test
+    void testKHopCapsAndValidation() {
+        GraphStore store = builtStore();
+
+        assertThatThrownBy(
+                        () ->
+                                store.kHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        2,
+                                        DegreeCap.of(1),
+                                        ResultCap.of(100)))
+                .isInstanceOf(GraphCapExceededException.class)
+                .hasMessageContaining("hit degreeCap=1");
+
+        assertThatThrownBy(
+                        () ->
+                                store.kHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        2,
+                                        DegreeCap.of(10),
+                                        ResultCap.of(1)))
+                .isInstanceOf(GraphCapExceededException.class)
+                .hasMessageContaining("exceeded resultCap=1");
+
+        assertThatThrownBy(
+                        () ->
+                                store.kHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        0,
+                                        DegreeCap.of(10),
+                                        ResultCap.of(100)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("at least 1");
+
+        assertThatThrownBy(
+                        () ->
+                                store.kHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        6,
+                                        DegreeCap.of(10),
+                                        ResultCap.of(100)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("at most 5 hops");
+    }
+
+    @Test
+    void testEdgeFilterOnAdjIterator() {
+        GraphStore store = builtStore();
+
+        List<Long> matched = new ArrayList<>();
+        try (AdjIterator it =
+                store.adj("transfer", Direction.OUT).from(1).project("sum_amount", "cnt")) {
+            EdgeFilter filter = EdgeFilter.where("sum_amount").ge(new BigDecimal("10"));
+            while (it.next()) {
+                if (filter.test(it)) {
+                    matched.add(it.dst());
+                }
+            }
+        }
+
+        assertThat(matched).containsExactly(2L);
+    }
+
+    @Test
+    void testCapsRejectNonPositiveValues() {
+        assertThatThrownBy(() -> DegreeCap.of(0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("DegreeCap must be positive");
+        assertThatThrownBy(() -> ResultCap.of(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ResultCap must be positive");
+    }
+
+    @Test
+    void testTwoHopUnknownEdgeAndColumn() {
+        GraphStore store = builtStore();
+
+        assertThatThrownBy(
+                        () ->
+                                store.twoHop(
+                                        "unknown",
+                                        Direction.OUT,
+                                        1L,
+                                        null,
+                                        DegreeCap.of(10),
+                                        ResultCap.of(100)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not bound to this graph store");
+
+        assertThatThrownBy(
+                        () ->
+                                store.twoHop(
+                                        "transfer",
+                                        Direction.OUT,
+                                        1L,
+                                        EdgeFilter.where("nope").ge(1L),
+                                        DegreeCap.of(10),
+                                        ResultCap.of(100)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("not part of the adjacency payload");
+    }
+
     // --------------------------------------------------------------------------------------------
     // Fixtures
     // --------------------------------------------------------------------------------------------

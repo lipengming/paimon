@@ -20,6 +20,7 @@ package org.apache.paimon.graph.sdk;
 
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.graph.GraphEdgeAggregate;
 import org.apache.paimon.graph.GraphEdgeIndexDecl;
 import org.apache.paimon.graph.GraphEdgeIndexPlanner;
 import org.apache.paimon.graph.GraphIndexDecls;
@@ -28,11 +29,18 @@ import org.apache.paimon.graph.GraphVertexIndexPlanner;
 import org.apache.paimon.options.GraphIndexOptions;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypeRoot;
+import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.RoaringNavigableMap64;
 
 import javax.annotation.Nullable;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.apache.paimon.utils.Preconditions.checkArgument;
@@ -43,6 +51,8 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  * over public APIs only.
  */
 public final class PaimonGraphStore implements GraphStore {
+
+    private static final int MAX_HOPS = 5;
 
     private final Map<String, VertexBinding> vertices;
     private final Map<String, EdgeBinding> edges;
@@ -116,6 +126,247 @@ public final class PaimonGraphStore implements GraphStore {
         VertexBinding binding = vertices.get(vertex);
         checkArgument(binding != null, "Vertex '%s' is not bound to this graph store.", vertex);
         return new VertexQuerier(binding.table, vertex, binding.decl.idField(), searchMode);
+    }
+
+    @Override
+    public List<Path2> twoHop(
+            String edge,
+            Direction direction,
+            long src,
+            @Nullable EdgeFilter filter,
+            DegreeCap degreeCap,
+            ResultCap resultCap) {
+        EdgeBinding binding = edge(edge);
+        List<AdjRow> firstHop = readAdjacencyRows(binding, edge, direction, src, Integer.MAX_VALUE);
+        if (filter != null) {
+            List<AdjRow> filtered = new ArrayList<>();
+            for (AdjRow row : firstHop) {
+                if (filter.testValues(row.values)) {
+                    filtered.add(row);
+                }
+            }
+            firstHop = filtered;
+        }
+
+        // rank the first hop by the filter column, or by the edge count when no filter is given,
+        // then expand only the top-N intermediate vertices (design §8.3)
+        String weight = filter != null ? filter.column() : numericWeightColumn(binding);
+        if (weight != null) {
+            final String weightColumn = weight;
+            Collections.sort(firstHop, (left, right) -> comparePayload(right, left, weightColumn));
+        }
+
+        List<Path2> paths = new ArrayList<>();
+        int topN = Math.min(degreeCap.value(), firstHop.size());
+        for (int i = 0; i < topN; i++) {
+            AdjRow mid = firstHop.get(i);
+            List<AdjRow> secondHop =
+                    readAdjacencyRows(binding, edge, direction, mid.dst, degreeCap.value());
+            for (AdjRow row : secondHop) {
+                paths.add(new Path2(src, mid.dst, row.dst, mid.values, row.values));
+                if (paths.size() > resultCap.value()) {
+                    throw new GraphCapExceededException(
+                            String.format(
+                                    "Two-hop traversal of '%s' from vertex %d exceeded resultCap=%d"
+                                            + " paths; narrow the filter or raise resultCap.",
+                                    edge, src, resultCap.value()));
+                }
+            }
+        }
+        return paths;
+    }
+
+    @Override
+    public List<GraphPath> kHop(
+            String edge,
+            Direction direction,
+            long src,
+            int hops,
+            DegreeCap degreeCap,
+            ResultCap resultCap) {
+        checkArgument(hops >= 1, "hops must be at least 1, but got %s.", hops);
+        checkArgument(
+                hops <= MAX_HOPS,
+                "kHop supports at most %s hops, but got %s; deeper traversals belong on the batch"
+                        + " engines (design §8.3).",
+                MAX_HOPS,
+                hops);
+        EdgeBinding binding = edge(edge);
+
+        RoaringNavigableMap64 visited = new RoaringNavigableMap64();
+        visited.add(src);
+        List<GraphPath> discovered = new ArrayList<>();
+        List<GraphPath> frontier = Collections.singletonList(GraphPath.of(src));
+        for (int depth = 0; depth < hops && !frontier.isEmpty(); depth++) {
+            List<GraphPath> next = new ArrayList<>();
+            for (GraphPath path : frontier) {
+                for (long neighbour :
+                        readDestinations(binding, direction, path.end(), degreeCap.value())) {
+                    // the global visited set turns the BFS into a forest and bounds cycles
+                    if (visited.contains(neighbour)) {
+                        continue;
+                    }
+                    visited.add(neighbour);
+                    GraphPath extended = path.append(neighbour);
+                    next.add(extended);
+                    discovered.add(extended);
+                    if (discovered.size() > resultCap.value()) {
+                        throw new GraphCapExceededException(
+                                String.format(
+                                        "K-hop traversal of '%s' from vertex %d exceeded"
+                                                + " resultCap=%d paths; raise resultCap or lower"
+                                                + " hops.",
+                                        edge, src, resultCap.value()));
+                    }
+                }
+            }
+            frontier = next;
+        }
+        return discovered;
+    }
+
+    private EdgeBinding edge(String edge) {
+        EdgeBinding binding = edges.get(edge);
+        checkArgument(binding != null, "Edge '%s' is not bound to this graph store.", edge);
+        return binding;
+    }
+
+    private List<AdjRow> readAdjacencyRows(
+            EdgeBinding binding, String edge, Direction direction, long from, int degreeCap) {
+        AdjQuery query = adjacencyQuery(binding, edge, direction);
+        query.from(from).degreeCap(degreeCap);
+        List<String> columns = aggregateColumns(binding.decl);
+        for (String column : columns) {
+            query.project(column);
+        }
+        RowType indexRowType = new RowType(indexTable(binding, direction).schema().fields());
+        List<AdjRow> rows = new ArrayList<>();
+        try (AdjQuery it = query) {
+            while (it.next()) {
+                Map<String, Object> values = new LinkedHashMap<>();
+                for (String column : columns) {
+                    values.put(column, payloadValue(it, column, indexRowType));
+                }
+                rows.add(new AdjRow(it.dst(), new EdgeValues(values)));
+            }
+        }
+        return rows;
+    }
+
+    private List<Long> readDestinations(
+            EdgeBinding binding, Direction direction, long from, int degreeCap) {
+        AdjQuery query = adjacencyQuery(binding, null, direction);
+        query.from(from).degreeCap(degreeCap);
+        List<Long> destinations = new ArrayList<>();
+        try (AdjQuery it = query) {
+            while (it.next()) {
+                destinations.add(it.dst());
+            }
+        }
+        return destinations;
+    }
+
+    private AdjQuery adjacencyQuery(
+            EdgeBinding binding, @Nullable String edge, Direction direction) {
+        FileStoreTable indexTable = indexTable(binding, direction);
+        String prefixField;
+        String dstField;
+        if (direction == Direction.IN) {
+            checkArgument(
+                    binding.reverse != null,
+                    "Edge '%s' does not declare reverse adjacency ('graph.edge.reverse' ="
+                            + " 'false'); IN traversals are unavailable.",
+                    edge);
+            prefixField = binding.decl.dstField();
+            dstField = binding.decl.srcField();
+        } else {
+            prefixField = binding.decl.srcField();
+            dstField = binding.decl.dstField();
+        }
+        return new AdjQuery(indexTable, edge, prefixField, dstField, searchMode);
+    }
+
+    private static FileStoreTable indexTable(EdgeBinding binding, Direction direction) {
+        return direction == Direction.IN ? binding.reverse : binding.forward;
+    }
+
+    private static List<String> aggregateColumns(GraphEdgeIndexDecl decl) {
+        List<String> columns = new ArrayList<>();
+        for (GraphEdgeAggregate aggregate : decl.aggregates()) {
+            columns.add(GraphEdgeIndexPlanner.aggregateColumn(aggregate));
+        }
+        return columns;
+    }
+
+    private static Object payloadValue(AdjQuery row, String column, RowType indexRowType) {
+        DataType type = fieldType(indexRowType, column);
+        switch (type.getTypeRoot()) {
+            case BIGINT:
+            case INTEGER:
+                return row.getLong(column);
+            case DECIMAL:
+                return row.getDecimal(column);
+            case VARCHAR:
+            case CHAR:
+                return row.getString(column);
+            default:
+                throw new IllegalArgumentException(
+                        "Adjacency payload column '"
+                                + column
+                                + "' of type "
+                                + type
+                                + " is not readable by the traversal SDK (supported: BIGINT, INT,"
+                                + " DECIMAL, STRING).");
+        }
+    }
+
+    private static DataType fieldType(RowType rowType, String column) {
+        for (org.apache.paimon.types.DataField field : rowType.getFields()) {
+            if (field.name().equals(column)) {
+                return field.type();
+            }
+        }
+        throw new IllegalArgumentException(
+                "Column '" + column + "' does not exist in the adjacency schema " + rowType + ".");
+    }
+
+    @Nullable
+    private static String numericWeightColumn(EdgeBinding binding) {
+        RowType rowType = new RowType(binding.forward.schema().fields());
+        for (String column : aggregateColumns(binding.decl)) {
+            DataTypeRoot root = fieldType(rowType, column).getTypeRoot();
+            if (root == DataTypeRoot.BIGINT
+                    || root == DataTypeRoot.INTEGER
+                    || root == DataTypeRoot.DECIMAL) {
+                return column;
+            }
+        }
+        return null;
+    }
+
+    private static int comparePayload(AdjRow left, AdjRow right, String column) {
+        Object leftValue = left.values.raw(column);
+        Object rightValue = right.values.raw(column);
+        if (leftValue == null || rightValue == null) {
+            return leftValue == null ? (rightValue == null ? 0 : -1) : 1;
+        }
+        if (leftValue instanceof BigDecimal || rightValue instanceof BigDecimal) {
+            return new BigDecimal(leftValue.toString())
+                    .compareTo(new BigDecimal(rightValue.toString()));
+        }
+        return Long.compare(((Number) leftValue).longValue(), ((Number) rightValue).longValue());
+    }
+
+    /** One materialized adjacency row: destination id plus its aggregate payload. */
+    private static final class AdjRow {
+
+        private final long dst;
+        private final EdgeValues values;
+
+        private AdjRow(long dst, EdgeValues values) {
+            this.dst = dst;
+            this.values = values;
+        }
     }
 
     @Override
