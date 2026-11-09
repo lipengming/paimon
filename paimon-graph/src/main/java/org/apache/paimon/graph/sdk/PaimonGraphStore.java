@@ -23,6 +23,7 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.graph.GraphEdgeAggregate;
 import org.apache.paimon.graph.GraphEdgeIndexDecl;
 import org.apache.paimon.graph.GraphEdgeIndexPlanner;
+import org.apache.paimon.graph.GraphEdgeIndexReconciler;
 import org.apache.paimon.graph.GraphIndexDecls;
 import org.apache.paimon.graph.GraphVertexIndexDecl;
 import org.apache.paimon.graph.GraphVertexIndexPlanner;
@@ -54,14 +55,17 @@ public final class PaimonGraphStore implements GraphStore {
 
     private static final int MAX_HOPS = 5;
 
+    private final Catalog catalog;
     private final Map<String, VertexBinding> vertices;
     private final Map<String, EdgeBinding> edges;
     private final SearchMode searchMode;
 
     private PaimonGraphStore(
+            Catalog catalog,
             Map<String, VertexBinding> vertices,
             Map<String, EdgeBinding> edges,
             SearchMode searchMode) {
+        this.catalog = catalog;
         this.vertices = vertices;
         this.edges = edges;
         this.searchMode = searchMode;
@@ -111,14 +115,22 @@ public final class PaimonGraphStore implements GraphStore {
                     edge,
                     binding.decl.dstField(),
                     binding.decl.srcField(),
-                    searchMode);
+                    searchMode,
+                    binding.base,
+                    binding.base.schema(),
+                    binding.decl,
+                    true);
         }
         return new AdjQuery(
                 binding.forward,
                 edge,
                 binding.decl.srcField(),
                 binding.decl.dstField(),
-                searchMode);
+                searchMode,
+                binding.base,
+                binding.base.schema(),
+                binding.decl,
+                false);
     }
 
     @Override
@@ -126,6 +138,17 @@ public final class PaimonGraphStore implements GraphStore {
         VertexBinding binding = vertices.get(vertex);
         checkArgument(binding != null, "Vertex '%s' is not bound to this graph store.", vertex);
         return new VertexQuerier(binding.table, vertex, binding.decl.idField(), searchMode);
+    }
+
+    @Override
+    public List<GraphEdgeIndexReconciler.IndexReconcileResult> reconcile(String edge) {
+        EdgeBinding binding = edge(edge);
+        try {
+            return GraphEdgeIndexReconciler.reconcile(catalog, binding.identifier);
+        } catch (Catalog.TableNotExistException e) {
+            throw new IllegalArgumentException(
+                    "Base table of edge '" + edge + "' does not exist in the catalog.", e);
+        }
     }
 
     @Override
@@ -466,6 +489,8 @@ public final class PaimonGraphStore implements GraphStore {
                 edges.put(
                         table,
                         new EdgeBinding(
+                                catalog,
+                                identifier(table),
                                 base,
                                 decl,
                                 loadIndexTable(table, GraphEdgeIndexPlanner.edgeTableName(table)),
@@ -475,7 +500,7 @@ public final class PaimonGraphStore implements GraphStore {
                                                 GraphEdgeIndexPlanner.edgeRevTableName(table))
                                         : null));
             }
-            return new PaimonGraphStore(vertices, edges, searchMode);
+            return new PaimonGraphStore(catalog, vertices, edges, searchMode);
         }
 
         private FileStoreTable loadVertexTable(String name) {
@@ -563,16 +588,22 @@ public final class PaimonGraphStore implements GraphStore {
     }
 
     private static final class EdgeBinding {
+        private final Catalog catalog;
+        private final Identifier identifier;
         private final FileStoreTable base;
         private final GraphEdgeIndexDecl decl;
         private final FileStoreTable forward;
         @Nullable private final FileStoreTable reverse;
 
         private EdgeBinding(
+                Catalog catalog,
+                Identifier identifier,
                 FileStoreTable base,
                 GraphEdgeIndexDecl decl,
                 FileStoreTable forward,
                 @Nullable FileStoreTable reverse) {
+            this.catalog = catalog;
+            this.identifier = identifier;
             this.base = base;
             this.decl = decl;
             this.forward = forward;

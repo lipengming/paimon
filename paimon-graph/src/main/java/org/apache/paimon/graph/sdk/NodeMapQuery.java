@@ -90,7 +90,7 @@ public class NodeMapQuery {
 
     /** Scans the matching node ids into a bitmap for SDK-side conjunctions. */
     public RoaringNavigableMap64 scanToBitmap() {
-        requireFast();
+        requireSupported();
         PredicateBuilder builder = new PredicateBuilder(rowType);
         int fieldIndex = fieldIndex(rowType, field);
         DataType fieldType = rowType.getFields().get(fieldIndex).type();
@@ -135,12 +135,15 @@ public class NodeMapQuery {
         }
     }
 
-    private void requireFast() {
-        if (searchMode != SearchMode.FAST) {
+    /**
+     * The pk-index backend is snapshot-consistent, so FULL reads behave like FAST ones; DETAIL is
+     * served by the reconciliation primitive instead of a single read.
+     */
+    private void requireSupported() {
+        if (searchMode == SearchMode.DETAIL) {
             throw new UnsupportedOperationException(
-                    "SearchMode "
-                            + searchMode
-                            + " arrives with the full-mode reconciliation; use FAST for now.");
+                    "SearchMode DETAIL is the reconciliation mode; call GraphStore.reconcile(...)"
+                            + " instead of a single read.");
         }
     }
 }

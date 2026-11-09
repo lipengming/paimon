@@ -81,7 +81,17 @@ public final class EdgeValues {
     @Nullable
     public BigDecimal getDecimal(String column) {
         Object value = raw(column);
-        return value == null ? null : (BigDecimal) value;
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof BigDecimal) {
+            return (BigDecimal) value;
+        }
+        if (value instanceof org.apache.paimon.data.Decimal) {
+            return ((org.apache.paimon.data.Decimal) value).toBigDecimal();
+        }
+        throw new IllegalArgumentException(
+                "Column '" + column + "' is not a DECIMAL column of the adjacency payload.");
     }
 
     @Override

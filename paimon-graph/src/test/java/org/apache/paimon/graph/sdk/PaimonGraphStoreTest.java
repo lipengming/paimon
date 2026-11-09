@@ -29,6 +29,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.fs.FileIO;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.graph.GraphEdgeIndexReconciler;
 import org.apache.paimon.graph.GraphIndexManager;
 import org.apache.paimon.options.GraphIndexOptions;
 import org.apache.paimon.options.Options;
@@ -59,6 +60,7 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 
 /**
  * End-to-end tests of the traversal SDK over a file system catalog: a pk-index vertex table plus an
@@ -214,26 +216,6 @@ class PaimonGraphStoreTest {
                                         .build())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("run the graph index create pipeline first");
-    }
-
-    @Test
-    void testFullModeUnsupported() {
-        createAndBackfillIndex();
-        GraphStore store =
-                PaimonGraphStore.builder()
-                        .catalog(catalog)
-                        .defaultDatabase("mydb")
-                        .vertex("person")
-                        .edge("transfer", "person", "person")
-                        .searchMode(SearchMode.FULL)
-                        .build();
-
-        assertThatThrownBy(() -> store.nodeMap("person", "phone").eq("p1").scanToBitmap())
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("SearchMode FULL");
-        assertThatThrownBy(() -> store.adj("transfer", Direction.OUT).from(1).next())
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("SearchMode FULL");
     }
 
     @Test
@@ -520,6 +502,103 @@ class PaimonGraphStoreTest {
                 .hasMessageContaining("not part of the adjacency payload");
     }
 
+    @Test
+    void testFullModeCatchesUpGap() throws Exception {
+        GraphStore fast = builtStore();
+        appendEvents(event(1L, 2L, "4.00"), event(2L, 4L, "9.00"), event(5L, 2L, "3.00"));
+
+        GraphStore full = store(SearchMode.FULL);
+
+        // FAST mode reads the index snapshot only
+        assertThat(adjacency(fast, Direction.OUT, 1L, "sum_amount", "cnt"))
+                .containsOnly(entry(2L, "15.00|2"), entry(3L, "7.00|1"));
+        assertThat(adjacency(fast, Direction.OUT, 2L, "sum_amount", "cnt"))
+                .containsOnly(entry(3L, "1.00|1"));
+
+        // FULL mode overlays the interval after the coverage watermark at query time
+        assertThat(adjacency(full, Direction.OUT, 1L, "sum_amount", "cnt"))
+                .containsEntry(2L, "19.00|3");
+        assertThat(adjacency(full, Direction.OUT, 2L, "sum_amount", "cnt"))
+                .containsEntry(3L, "1.00|1")
+                .containsEntry(4L, "9.00|1");
+        // the 1 -> 2 append is caught up in the reverse adjacency as well
+        assertThat(adjacency(full, Direction.IN, 2L, "sum_amount", "cnt"))
+                .containsOnly(entry(1L, "19.00|3"), entry(5L, "3.00|1"));
+    }
+
+    @Test
+    void testFullModeMatchesFastWhenCovered() throws Exception {
+        GraphStore fast = builtStore();
+        GraphStore full = store(SearchMode.FULL);
+
+        assertThat(adjacency(full, Direction.OUT, 1L, "sum_amount", "cnt"))
+                .isEqualTo(adjacency(fast, Direction.OUT, 1L, "sum_amount", "cnt"));
+        assertThat(full.nodeMap("person", "phone").eq("p1").scanToBitmap().getLongCardinality())
+                .isEqualTo(2L);
+        assertThat(full.vertex("person").lookup(1L)).isPresent();
+    }
+
+    @Test
+    void testDetailModeDelegatesToReconcile() {
+        GraphStore store = builtStore();
+        GraphStore detail = store(SearchMode.DETAIL);
+
+        assertThatThrownBy(() -> detail.adj("transfer", Direction.OUT).from(1L).next())
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("GraphStore.reconcile");
+        assertThatThrownBy(() -> detail.nodeMap("person", "phone").eq("p1").scanToBitmap())
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("reconciliation mode");
+        assertThatThrownBy(() -> detail.vertex("person").lookup(1L))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("reconciliation mode");
+        assertThat(store.reconcile("transfer")).hasSize(2).allMatch(result -> result.consistent());
+    }
+
+    @Test
+    void testReconcileDetectsMissingPairs() throws Exception {
+        builtStore();
+        // an existing pair that was not maintained, and a brand new pair
+        appendEvents(event(1L, 2L, "4.00"), event(6L, 7L, "1.00"));
+
+        List<GraphEdgeIndexReconciler.IndexReconcileResult> results =
+                store(SearchMode.FAST).reconcile("transfer");
+
+        assertThat(results).hasSize(2).noneMatch(result -> result.consistent());
+        for (GraphEdgeIndexReconciler.IndexReconcileResult result : results) {
+            assertThat(result.missingPairs()).isEqualTo(1L);
+            assertThat(result.mismatchedPairs()).isEqualTo(1L);
+            assertThat(String.join(";", result.samples()))
+                    .contains("missing")
+                    .contains("mismatched");
+        }
+    }
+
+    @Test
+    void testReconcileDetectsExtraPairsAndPositiveMismatch() throws Exception {
+        builtStore();
+        // tamper forward index: an extra pair and a wrong sum for an existing pair
+        batchWrite(
+                table("transfer__edge"),
+                Arrays.asList(
+                        GenericRow.of(8L, 9L, decimal("1.00"), 1L),
+                        GenericRow.of(1L, 2L, decimal("99.00"), 2L)));
+
+        List<GraphEdgeIndexReconciler.IndexReconcileResult> results =
+                store(SearchMode.FAST).reconcile("transfer");
+
+        GraphEdgeIndexReconciler.IndexReconcileResult forward = results.get(0);
+        assertThat(forward.consistent()).isFalse();
+        assertThat(forward.extraPairs()).isEqualTo(1L);
+        assertThat(forward.mismatchedPairs()).isEqualTo(1L);
+        assertThat(String.join(";", forward.samples()))
+                .contains("extra (8, 9)")
+                .contains("mismatched (1, 2)");
+
+        GraphEdgeIndexReconciler.IndexReconcileResult reverse = results.get(1);
+        assertThat(reverse.consistent()).isTrue();
+    }
+
     // --------------------------------------------------------------------------------------------
     // Fixtures
     // --------------------------------------------------------------------------------------------
@@ -634,12 +713,43 @@ class PaimonGraphStoreTest {
 
     private GraphStore builtStore() {
         createAndBackfillIndex();
+        return store(SearchMode.FAST);
+    }
+
+    private GraphStore store(SearchMode searchMode) {
         return PaimonGraphStore.builder()
                 .catalog(catalog)
                 .defaultDatabase("mydb")
                 .vertex("person")
                 .edge("transfer", "person", "person")
+                .searchMode(searchMode)
                 .build();
+    }
+
+    private FileStoreTable table(String name) throws Exception {
+        return (FileStoreTable) catalog.getTable(Identifier.create("mydb", name));
+    }
+
+    private void appendEvents(GenericRow... events) throws Exception {
+        batchWrite(table("transfer"), Arrays.asList(events));
+    }
+
+    private static Decimal decimal(String value) {
+        return Decimal.fromBigDecimal(new BigDecimal(value), 18, 2);
+    }
+
+    /** Reads 'dst' -> 'sum|cnt' of one adjacency scan. */
+    private static Map<Long, String> adjacency(
+            GraphStore store, Direction direction, long from, String... columns) {
+        Map<Long, String> result = new LinkedHashMap<>();
+        try (AdjIterator it = store.adj("transfer", direction).from(from).project(columns)) {
+            while (it.next()) {
+                result.put(
+                        it.dst(),
+                        it.getDecimal("sum_amount").toPlainString() + "|" + it.getLong("cnt"));
+            }
+        }
+        return result;
     }
 
     /** Runs the create pipeline and a test-side batch backfill (sum/cnt aggregation in Java). */

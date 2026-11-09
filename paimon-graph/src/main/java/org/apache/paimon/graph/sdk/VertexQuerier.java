@@ -50,7 +50,7 @@ public class VertexQuerier {
 
     /** Looks up one vertex by its node id. */
     public Optional<Vertex> lookup(long id) {
-        requireFast();
+        requireSupported();
         int idIndex = fieldIndex(rowType, idField);
         Predicate filter = new PredicateBuilder(rowType).equal(idIndex, id);
         java.util.List<BinaryRow> rows = GraphReads.readRows(table, filter, null);
@@ -72,12 +72,15 @@ public class VertexQuerier {
         return lookup(id.id());
     }
 
-    private void requireFast() {
-        if (searchMode != SearchMode.FAST) {
+    /**
+     * The pk-index backend is snapshot-consistent, so FULL reads behave like FAST ones; DETAIL is
+     * served by the reconciliation primitive instead of a single read.
+     */
+    private void requireSupported() {
+        if (searchMode == SearchMode.DETAIL) {
             throw new UnsupportedOperationException(
-                    "SearchMode "
-                            + searchMode
-                            + " arrives with the full-mode reconciliation; use FAST for now.");
+                    "SearchMode DETAIL is the reconciliation mode; call GraphStore.reconcile(...)"
+                            + " instead of a single read.");
         }
     }
 }

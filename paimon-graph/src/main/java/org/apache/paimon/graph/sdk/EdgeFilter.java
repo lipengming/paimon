@@ -76,14 +76,8 @@ public final class EdgeFilter {
             return false;
         }
         if (value instanceof BigDecimal) {
-            if (!(actual instanceof BigDecimal)) {
-                throw new IllegalArgumentException(
-                        "Column '"
-                                + column
-                                + "' is not a decimal column, so it cannot be compared with a"
-                                + " decimal EdgeFilter value.");
-            }
-            return compare(((BigDecimal) actual).compareTo((BigDecimal) value));
+            BigDecimal actualDecimal = values.getDecimal(column);
+            return actualDecimal != null && compare(actualDecimal.compareTo((BigDecimal) value));
         }
         if (!(actual instanceof Number)) {
             throw new IllegalArgumentException(

@@ -19,6 +19,7 @@
 package org.apache.paimon.graph.sdk;
 
 import org.apache.paimon.annotation.Public;
+import org.apache.paimon.graph.GraphEdgeIndexReconciler;
 
 import javax.annotation.Nullable;
 
@@ -63,6 +64,13 @@ public interface GraphStore extends AutoCloseable {
             @Nullable EdgeFilter filter,
             DegreeCap degreeCap,
             ResultCap resultCap);
+
+    /**
+     * Detail reconciliation of both adjacency index tables of one edge (design §5.6/§6.3): compares
+     * the full-history aggregation of the base table with the index contents and reports missing,
+     * extra and mismatched pairs.
+     */
+    List<GraphEdgeIndexReconciler.IndexReconcileResult> reconcile(String edge);
 
     /**
      * Breadth-first K-hop traversal (design §8.1 ⑥): returns every path discovered up to {@code
