@@ -139,21 +139,23 @@ public final class GraphVertexIndexPlanner {
         List<String> btree = new ArrayList<>(existingBtree);
         List<String> bitmap = new ArrayList<>(existingBitmap);
         for (GraphVertexIndexDecl.NodeMapField nodeMapField : vertex.nodeMapFields()) {
-            String declaredIn = null;
-            if (existingBtree.contains(nodeMapField.field())) {
-                declaredIn = btreeKey;
-            } else if (existingBitmap.contains(nodeMapField.field())) {
-                declaredIn = bitmapKey;
-            }
+            boolean bitmapFamily = FAMILY_BITMAP.equals(nodeMapField.family());
+            List<String> target = bitmapFamily ? bitmap : btree;
+            List<String> other = bitmapFamily ? btree : bitmap;
+            String otherKey = bitmapFamily ? btreeKey : bitmapKey;
+
+            // the expansion itself is idempotent: a field already declared in the same family was
+            // written by a previous create, and only a different-family declaration is a conflict
             checkArgument(
-                    declaredIn == null,
+                    !other.contains(nodeMapField.field()),
                     "Column '%s' in 'graph.vertex.node-map.fields' is already declared in option"
                             + " '%s' of table '%s'.",
                     nodeMapField.field(),
-                    declaredIn,
+                    otherKey,
                     baseTableName);
-            (FAMILY_BITMAP.equals(nodeMapField.family()) ? bitmap : btree)
-                    .add(nodeMapField.field());
+            if (!target.contains(nodeMapField.field())) {
+                target.add(nodeMapField.field());
+            }
         }
 
         Map<String, String> result = new LinkedHashMap<>();

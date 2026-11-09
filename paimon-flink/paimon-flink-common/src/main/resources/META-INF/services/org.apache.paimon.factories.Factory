@@ -62,6 +62,8 @@ org.apache.paimon.flink.procedure.CompactProcedure
 org.apache.paimon.flink.procedure.CompactChainTableProcedure
 org.apache.paimon.flink.procedure.RewriteFileIndexProcedure
 org.apache.paimon.flink.procedure.CreateTagProcedure
+org.apache.paimon.flink.procedure.CreateGraphIndexProcedure
+org.apache.paimon.flink.procedure.DropGraphIndexProcedure
 org.apache.paimon.flink.procedure.CreateTagFromTimestampProcedure
 org.apache.paimon.flink.procedure.CreateTagFromWatermarkProcedure
 org.apache.paimon.flink.procedure.DeleteTagProcedure

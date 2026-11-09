@@ -92,6 +92,14 @@ public final class GraphEdgeIndexMaintainer {
                                                         baseName)));
 
         String forwardTableName = GraphEdgeIndexPlanner.edgeTableName(baseName);
+        checkArgument(
+                !GraphIndexStatusTable.STATUS_LOGICAL_DELETED.equals(
+                        baseSchema
+                                .options()
+                                .get(GraphIndexOptions.STATUS_KEY_PREFIX + forwardTableName)),
+                "Graph adjacency index of '%s' is logically dropped; re-run"
+                        + " create_graph_index to re-enable it.",
+                baseName);
         Long from = effectiveWatermark(baseSchema, forwardTableName);
         checkArgument(
                 from != null,

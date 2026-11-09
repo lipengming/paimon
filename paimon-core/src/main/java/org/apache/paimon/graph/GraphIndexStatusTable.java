@@ -69,6 +69,8 @@ public final class GraphIndexStatusTable {
     public static final String STATUS_BUILDING = "BUILDING";
     public static final String STATUS_ACTIVE = "ACTIVE";
     public static final String STATUS_LOGICAL_DELETED = "LOGICAL_DELETED";
+    /** Physical artifacts of a purged index binding are gone. */
+    public static final String STATUS_DELETED = "DELETED";
 
     private static final List<DataField> COLUMNS =
             Arrays.asList(
